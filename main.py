@@ -11,6 +11,23 @@ from firebase_admin import credentials, firestore
 from telegram import Bot
 from telegram._utils.warnings import warn as tg_warn
 import warnings
+import tempfile
+
+# Загрузка Firebase ключа
+firebase_key_json = os.getenv("FIREBASE_KEY")
+if firebase_key_json:
+    # Создаем временный файл из содержимого переменной
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        f.write(firebase_key_json)
+        firebase_key_path = f.name
+    print(f"Using temporary Firebase key file: {firebase_key_path}")
+else:
+    firebase_key_path = os.getenv("FIREBASE_KEY_PATH", "fitnesspooh-firebase-key.json")
+    print(f"Using local Firebase key file: {firebase_key_path}")
+
+cred = credentials.Certificate(firebase_key_path)
+firebase_admin.initialize_app(cred)
+db = firestore.client()
 
 # Ignore telegram warning about webhook (we don't use it)
 warnings.filterwarnings("ignore", category=UserWarning, module="telegram")
