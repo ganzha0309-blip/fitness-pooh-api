@@ -10,6 +10,10 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from telegram import Bot
 import warnings
+import hashlib
+import hmac
+from urllib.parse import parse_qs, unquote
+import json
 
 # Загружаем переменные окружения из .env (только для локальной разработки)
 load_dotenv()
@@ -92,18 +96,35 @@ def compute_level(xp: int) -> str:
     return levels[0]
 
 def verify_init_data(init_data: str) -> dict:
-    """Проверяет подпись initData и возвращает данные пользователя"""
-    try:
-        result = bot.parse_web_app_data(init_data)
-        if not result.user:
-            raise ValueError("No user in initData")
-        return {
-            "id": result.user.id,
-            "first_name": result.user.first_name,
-            "username": result.user.username,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Invalid initData: {e}")
+    """Проверяет подпись initData согласно спецификации Telegram"""
+    parsed = parse_qs(init_data)
+    if 'hash' not in parsed:
+        raise HTTPException(status_code=401, detail="No hash in initData")
+    received_hash = parsed['hash'][0]
+    del parsed['hash']
+
+    # Сортируем ключи и формируем строку для проверки
+    sorted_keys = sorted(parsed.keys())
+    check_string = '\n'.join([f"{k}={unquote(parsed[k][0])}" for k in sorted_keys])
+
+    # Вычисляем secret_key = HMAC_SHA256("WebAppData", bot_token)
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode('utf-8'), hashlib.sha256).digest()
+    # Ожидаемый hash
+    expected_hash = hmac.new(secret_key, check_string.encode('utf-8'), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(expected_hash, received_hash):
+        raise HTTPException(status_code=401, detail="Invalid hash")
+
+    # Извлекаем пользователя
+    user_str = parsed.get('user', [None])[0]
+    if not user_str:
+        raise HTTPException(status_code=401, detail="No user in initData")
+    user = json.loads(unquote(user_str))
+    return {
+        "id": user.get('id'),
+        "first_name": user.get('first_name', ''),
+        "username": user.get('username', '')
+    }
 
 def get_or_create_user(telegram_id: str, first_name: str, username: str = None):
     user_ref = db.collection('users').document(telegram_id)
