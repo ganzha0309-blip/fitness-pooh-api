@@ -217,7 +217,14 @@ async def mark_habit(request: HabitRequest):
         streak = user.get("streak", 0)
 
     if habits.get(habit, 0) >= 1:
-        return {"ok": False, "message": "Эта привычка уже отмечена сегодня."}
+        return {
+            "ok": False,
+            "message": "Эта привычка уже отмечена сегодня.",
+            "xp": user.get("xp", 0),
+            "streak": streak,
+            "level": compute_level(user.get("xp", 0)),
+            "habits": today_habits({"last_action_date": today, "habits": habits}),
+        }
 
     habits[habit] = 1
     new_xp = user.get("xp", 0) + 10
