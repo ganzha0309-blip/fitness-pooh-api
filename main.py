@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import parse_qs, unquote
@@ -36,7 +37,12 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 MSK = timezone(timedelta(hours=3))
-HABITS = {"water", "workout", "sleep"}
+DEFAULT_HABITS = [
+    {"code": "water", "title": "Вода", "icon": "💧", "caption": "2 литра за день", "is_default": True},
+    {"code": "workout", "title": "Тренировка", "icon": "🏋️", "caption": "Любая активность", "is_default": True},
+    {"code": "sleep", "title": "Сон", "icon": "😴", "caption": "7-8 часов", "is_default": True},
+]
+CUSTOM_HABIT_LIMITS = {"free": 0, "base": 1, "pro": 2, "vip": 3}
 LEVELS = {
     0: "🍯 Новобранец",
     100: "💪 Боец",
@@ -72,6 +78,23 @@ class HabitRequest(BaseModel):
     habit: str
 
 
+class HabitEditRequest(BaseModel):
+    initData: str
+    code: str
+    title: str
+
+
+class HabitAddRequest(BaseModel):
+    initData: str
+    title: str
+    icon: Optional[str] = None
+
+
+class HabitDeleteRequest(BaseModel):
+    initData: str
+    code: str
+
+
 class ProfileResponse(BaseModel):
     name: str
     xp: int
@@ -82,6 +105,9 @@ class ProfileResponse(BaseModel):
     last_action_date: Optional[str] = None
     level: str
     habits: dict[str, int]
+    habit_items: list[dict]
+    custom_habit_limit: int
+    custom_habit_count: int
 
 
 def today_iso() -> str:
@@ -93,6 +119,11 @@ def compute_level(xp: int) -> str:
         if xp >= threshold:
             return LEVELS[threshold]
     return LEVELS[0]
+
+
+def normalize_subscription(subscription: str | None) -> str:
+    value = (subscription or "free").lower()
+    return value if value in CUSTOM_HABIT_LIMITS else "free"
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -136,6 +167,10 @@ def get_or_create_user(telegram_id: str, first_name: str, username: str | None =
             updates["name"] = first_name
         if "subscription_until" not in user:
             updates["subscription_until"] = None
+        if "habit_settings" not in user:
+            updates["habit_settings"] = {}
+        if "custom_habits" not in user:
+            updates["custom_habits"] = []
         if updates:
             user_ref.update(updates)
             user.update(updates)
@@ -149,61 +184,99 @@ def get_or_create_user(telegram_id: str, first_name: str, username: str | None =
         "last_action_date": None,
         "subscription": "free",
         "subscription_until": None,
-        "habits": {"water": 0, "workout": 0, "sleep": 0},
+        "habits": {habit["code"]: 0 for habit in DEFAULT_HABITS},
+        "habit_settings": {},
+        "custom_habits": [],
         "created_at": today_iso(),
     }
     user_ref.set(new_user)
     return new_user
 
 
+def get_habit_items(user: dict) -> list[dict]:
+    settings = user.get("habit_settings", {}) or {}
+    items = []
+    for habit in DEFAULT_HABITS:
+        custom = settings.get(habit["code"], {})
+        items.append({**habit, "title": custom.get("title") or habit["title"]})
+
+    subscription = normalize_subscription(user.get("subscription"))
+    custom_limit = CUSTOM_HABIT_LIMITS[subscription]
+    for habit in (user.get("custom_habits") or [])[:custom_limit]:
+        code = habit.get("code")
+        title = (habit.get("title") or "").strip()
+        if code and title:
+            items.append(
+                {
+                    "code": code,
+                    "title": title[:32],
+                    "icon": habit.get("icon") or "✅",
+                    "caption": "Кастомная привычка",
+                    "is_default": False,
+                }
+            )
+    return items
+
+
+def empty_habits_for(user: dict) -> dict[str, int]:
+    return {habit["code"]: 0 for habit in get_habit_items(user)}
+
+
 def today_habits(user: dict) -> dict[str, int]:
+    empty = empty_habits_for(user)
     if user.get("last_action_date") != today_iso():
-        return {"water": 0, "workout": 0, "sleep": 0}
-    habits = user.get("habits", {})
-    return {
-        "water": int(bool(habits.get("water"))),
-        "workout": int(bool(habits.get("workout"))),
-        "sleep": int(bool(habits.get("sleep"))),
-    }
+        return empty
+    stored = user.get("habits", {}) or {}
+    return {code: int(bool(stored.get(code))) for code in empty}
 
 
-@app.post("/auth", response_model=ProfileResponse)
-async def auth(request: AuthRequest):
-    data = verify_init_data(request.initData)
-    user = get_or_create_user(str(data["id"]), data["first_name"], data.get("username"))
+def profile_payload(user: dict) -> ProfileResponse:
+    subscription = normalize_subscription(user.get("subscription"))
+    custom_habits = user.get("custom_habits") or []
     return ProfileResponse(
         name=user["name"],
         xp=user.get("xp", 0),
         streak=user.get("streak", 0),
-        subscription=user.get("subscription", "free"),
+        subscription=subscription,
         subscription_until=user.get("subscription_until"),
         username=user.get("username"),
         last_action_date=user.get("last_action_date"),
         level=compute_level(user.get("xp", 0)),
         habits=today_habits(user),
+        habit_items=get_habit_items(user),
+        custom_habit_limit=CUSTOM_HABIT_LIMITS[subscription],
+        custom_habit_count=len(custom_habits),
     )
+
+
+def current_user_from_init(init_data: str) -> tuple[str, dict]:
+    data = verify_init_data(init_data)
+    telegram_id = str(data["id"])
+    user = get_or_create_user(telegram_id, data["first_name"], data.get("username"))
+    return telegram_id, user
+
+
+@app.post("/auth", response_model=ProfileResponse)
+async def auth(request: AuthRequest):
+    _, user = current_user_from_init(request.initData)
+    return profile_payload(user)
 
 
 @app.post("/habit")
 async def mark_habit(request: HabitRequest):
-    data = verify_init_data(request.initData)
-    telegram_id = str(data["id"])
+    telegram_id, user = current_user_from_init(request.initData)
     habit = request.habit
-    if habit not in HABITS:
-        raise HTTPException(status_code=400, detail="Invalid habit")
+    allowed_codes = {item["code"] for item in get_habit_items(user)}
+    if habit not in allowed_codes:
+        raise HTTPException(status_code=400, detail="Habit is not available for your subscription")
 
     today = today_iso()
     user_ref = db.collection("users").document(telegram_id)
-    doc = user_ref.get()
-    if not doc.exists:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user = doc.to_dict()
-    habits = user.get("habits", {})
+    habits = user.get("habits", {}) or {}
     last_date = user.get("last_action_date")
 
     if last_date != today:
-        habits = {"water": 0, "workout": 0, "sleep": 0}
+        habits = empty_habits_for(user)
         try:
             previous_date = datetime.fromisoformat(last_date).date() if last_date else None
         except ValueError:
@@ -217,18 +290,20 @@ async def mark_habit(request: HabitRequest):
         streak = user.get("streak", 0)
 
     if habits.get(habit, 0) >= 1:
+        user["habits"] = habits
+        user["last_action_date"] = today
         return {
             "ok": False,
             "message": "Эта привычка уже отмечена сегодня.",
             "xp": user.get("xp", 0),
             "streak": streak,
             "level": compute_level(user.get("xp", 0)),
-            "habits": today_habits({"last_action_date": today, "habits": habits}),
+            "habits": today_habits(user),
+            "habit_items": get_habit_items(user),
         }
 
     habits[habit] = 1
     new_xp = user.get("xp", 0) + 10
-
     user_ref.update(
         {
             "xp": new_xp,
@@ -237,15 +312,85 @@ async def mark_habit(request: HabitRequest):
             "habits": habits,
         }
     )
+    user.update({"xp": new_xp, "streak": streak, "last_action_date": today, "habits": habits})
 
     return {
         "ok": True,
         "new_xp": new_xp,
         "new_streak": streak,
         "level": compute_level(new_xp),
-        "habits": today_habits({"last_action_date": today, "habits": habits}),
+        "habits": today_habits(user),
+        "habit_items": get_habit_items(user),
         "message": f"+10 XP! Серия: {streak} дн.",
     }
+
+
+@app.post("/habit/edit")
+async def edit_habit(request: HabitEditRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    title = request.title.strip()[:32]
+    if len(title) < 2:
+        raise HTTPException(status_code=400, detail="Habit title is too short")
+
+    code = request.code
+    default_codes = {habit["code"] for habit in DEFAULT_HABITS}
+    user_ref = db.collection("users").document(telegram_id)
+
+    if code in default_codes:
+        user_ref.update({f"habit_settings.{code}.title": title})
+        user.setdefault("habit_settings", {}).setdefault(code, {})["title"] = title
+        return {"ok": True, "profile": profile_payload(user)}
+
+    custom_habits = user.get("custom_habits") or []
+    for habit in custom_habits:
+        if habit.get("code") == code:
+            habit["title"] = title
+            user_ref.update({"custom_habits": custom_habits})
+            user["custom_habits"] = custom_habits
+            return {"ok": True, "profile": profile_payload(user)}
+
+    raise HTTPException(status_code=404, detail="Habit not found")
+
+
+@app.post("/habit/add")
+async def add_habit(request: HabitAddRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    title = request.title.strip()[:32]
+    if len(title) < 2:
+        raise HTTPException(status_code=400, detail="Habit title is too short")
+
+    subscription = normalize_subscription(user.get("subscription"))
+    limit = CUSTOM_HABIT_LIMITS[subscription]
+    custom_habits = user.get("custom_habits") or []
+    if len(custom_habits) >= limit:
+        raise HTTPException(status_code=403, detail="Habit limit reached for your subscription")
+
+    new_habit = {
+        "code": f"custom_{int(time.time())}_{len(custom_habits) + 1}",
+        "title": title,
+        "icon": (request.icon or "✅")[:2],
+    }
+    custom_habits.append(new_habit)
+    db.collection("users").document(telegram_id).update({"custom_habits": custom_habits})
+    user["custom_habits"] = custom_habits
+    return {"ok": True, "profile": profile_payload(user)}
+
+
+@app.post("/habit/delete")
+async def delete_habit(request: HabitDeleteRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    if request.code in {habit["code"] for habit in DEFAULT_HABITS}:
+        raise HTTPException(status_code=400, detail="Default habits can only be renamed")
+
+    custom_habits = [
+        habit for habit in (user.get("custom_habits") or []) if habit.get("code") != request.code
+    ]
+    if len(custom_habits) == len(user.get("custom_habits") or []):
+        raise HTTPException(status_code=404, detail="Habit not found")
+
+    db.collection("users").document(telegram_id).update({"custom_habits": custom_habits})
+    user["custom_habits"] = custom_habits
+    return {"ok": True, "profile": profile_payload(user)}
 
 
 @app.get("/trainings")
