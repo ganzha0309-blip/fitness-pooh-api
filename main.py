@@ -83,12 +83,14 @@ class HabitEditRequest(BaseModel):
     code: str
     title: str
     icon: Optional[str] = None
+    caption: Optional[str] = None
 
 
 class HabitAddRequest(BaseModel):
     initData: str
     title: str
     icon: Optional[str] = None
+    caption: Optional[str] = None
 
 
 class HabitDeleteRequest(BaseModel):
@@ -130,6 +132,10 @@ def normalize_subscription(subscription: str | None) -> str:
 def normalize_icon(icon: str | None, fallback: str = "✅") -> str:
     value = (icon or "").strip()
     return value[:4] if value else fallback
+
+
+def normalize_caption(caption: str | None) -> str:
+    return (caption or "").strip()[:48]
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -209,7 +215,7 @@ def get_habit_items(user: dict) -> list[dict]:
                 **habit,
                 "title": custom.get("title") or habit["title"],
                 "icon": custom.get("icon") or habit["icon"],
-                "caption": "Базовая привычка",
+                "caption": custom.get("caption") or "",
             }
         )
 
@@ -224,7 +230,7 @@ def get_habit_items(user: dict) -> list[dict]:
                     "code": code,
                     "title": title[:32],
                     "icon": normalize_icon(habit.get("icon")),
-                    "caption": "Кастомная привычка",
+                    "caption": habit.get("caption") or "",
                     "is_default": False,
                 }
             )
@@ -347,6 +353,7 @@ async def edit_habit(request: HabitEditRequest):
 
     code = request.code
     icon = normalize_icon(request.icon, "")
+    caption = normalize_caption(request.caption)
     default_codes = {habit["code"] for habit in DEFAULT_HABITS}
     user_ref = db.collection("users").document(telegram_id)
 
@@ -354,10 +361,12 @@ async def edit_habit(request: HabitEditRequest):
         updates = {f"habit_settings.{code}.title": title}
         if icon:
             updates[f"habit_settings.{code}.icon"] = icon
+        updates[f"habit_settings.{code}.caption"] = caption
         user_ref.update(updates)
         user.setdefault("habit_settings", {}).setdefault(code, {})["title"] = title
         if icon:
             user["habit_settings"][code]["icon"] = icon
+        user["habit_settings"][code]["caption"] = caption
         return {"ok": True, "profile": profile_payload(user)}
 
     custom_habits = user.get("custom_habits") or []
@@ -366,6 +375,7 @@ async def edit_habit(request: HabitEditRequest):
             habit["title"] = title
             if icon:
                 habit["icon"] = icon
+            habit["caption"] = caption
             user_ref.update({"custom_habits": custom_habits})
             user["custom_habits"] = custom_habits
             return {"ok": True, "profile": profile_payload(user)}
@@ -390,6 +400,7 @@ async def add_habit(request: HabitAddRequest):
         "code": f"custom_{int(time.time())}_{len(custom_habits) + 1}",
         "title": title,
         "icon": normalize_icon(request.icon),
+        "caption": normalize_caption(request.caption),
     }
     custom_habits.append(new_habit)
     db.collection("users").document(telegram_id).update({"custom_habits": custom_habits})
