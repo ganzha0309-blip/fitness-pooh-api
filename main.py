@@ -82,6 +82,7 @@ class HabitEditRequest(BaseModel):
     initData: str
     code: str
     title: str
+    icon: Optional[str] = None
 
 
 class HabitAddRequest(BaseModel):
@@ -124,6 +125,11 @@ def compute_level(xp: int) -> str:
 def normalize_subscription(subscription: str | None) -> str:
     value = (subscription or "free").lower()
     return value if value in CUSTOM_HABIT_LIMITS else "free"
+
+
+def normalize_icon(icon: str | None, fallback: str = "✅") -> str:
+    value = (icon or "").strip()
+    return value[:4] if value else fallback
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -198,7 +204,14 @@ def get_habit_items(user: dict) -> list[dict]:
     items = []
     for habit in DEFAULT_HABITS:
         custom = settings.get(habit["code"], {})
-        items.append({**habit, "title": custom.get("title") or habit["title"]})
+        items.append(
+            {
+                **habit,
+                "title": custom.get("title") or habit["title"],
+                "icon": custom.get("icon") or habit["icon"],
+                "caption": "Базовая привычка",
+            }
+        )
 
     subscription = normalize_subscription(user.get("subscription"))
     custom_limit = CUSTOM_HABIT_LIMITS[subscription]
@@ -210,7 +223,7 @@ def get_habit_items(user: dict) -> list[dict]:
                 {
                     "code": code,
                     "title": title[:32],
-                    "icon": habit.get("icon") or "✅",
+                    "icon": normalize_icon(habit.get("icon")),
                     "caption": "Кастомная привычка",
                     "is_default": False,
                 }
@@ -333,18 +346,26 @@ async def edit_habit(request: HabitEditRequest):
         raise HTTPException(status_code=400, detail="Habit title is too short")
 
     code = request.code
+    icon = normalize_icon(request.icon, "")
     default_codes = {habit["code"] for habit in DEFAULT_HABITS}
     user_ref = db.collection("users").document(telegram_id)
 
     if code in default_codes:
-        user_ref.update({f"habit_settings.{code}.title": title})
+        updates = {f"habit_settings.{code}.title": title}
+        if icon:
+            updates[f"habit_settings.{code}.icon"] = icon
+        user_ref.update(updates)
         user.setdefault("habit_settings", {}).setdefault(code, {})["title"] = title
+        if icon:
+            user["habit_settings"][code]["icon"] = icon
         return {"ok": True, "profile": profile_payload(user)}
 
     custom_habits = user.get("custom_habits") or []
     for habit in custom_habits:
         if habit.get("code") == code:
             habit["title"] = title
+            if icon:
+                habit["icon"] = icon
             user_ref.update({"custom_habits": custom_habits})
             user["custom_habits"] = custom_habits
             return {"ok": True, "profile": profile_payload(user)}
@@ -368,7 +389,7 @@ async def add_habit(request: HabitAddRequest):
     new_habit = {
         "code": f"custom_{int(time.time())}_{len(custom_habits) + 1}",
         "title": title,
-        "icon": (request.icon or "✅")[:2],
+        "icon": normalize_icon(request.icon),
     }
     custom_habits.append(new_habit)
     db.collection("users").document(telegram_id).update({"custom_habits": custom_habits})
