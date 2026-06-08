@@ -98,6 +98,16 @@ class HabitDeleteRequest(BaseModel):
     code: str
 
 
+class ProgressAddRequest(BaseModel):
+    initData: str
+    weight: Optional[float] = None
+    waist: Optional[float] = None
+    chest: Optional[float] = None
+    arm: Optional[float] = None
+    thigh: Optional[float] = None
+    note: Optional[str] = None
+
+
 class ProfileResponse(BaseModel):
     name: str
     xp: int
@@ -183,6 +193,8 @@ def get_or_create_user(telegram_id: str, first_name: str, username: str | None =
             updates["habit_settings"] = {}
         if "custom_habits" not in user:
             updates["custom_habits"] = []
+        if "progress_entries" not in user:
+            updates["progress_entries"] = []
         if updates:
             user_ref.update(updates)
             user.update(updates)
@@ -199,6 +211,7 @@ def get_or_create_user(telegram_id: str, first_name: str, username: str | None =
         "habits": {habit["code"]: 0 for habit in DEFAULT_HABITS},
         "habit_settings": {},
         "custom_habits": [],
+        "progress_entries": [],
         "created_at": today_iso(),
     }
     user_ref.set(new_user)
@@ -273,6 +286,27 @@ def current_user_from_init(init_data: str) -> tuple[str, dict]:
     telegram_id = str(data["id"])
     user = get_or_create_user(telegram_id, data["first_name"], data.get("username"))
     return telegram_id, user
+
+
+def clean_measure(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if value <= 0 or value > 500:
+        raise HTTPException(status_code=400, detail="Invalid measurement value")
+    return round(float(value), 1)
+
+
+def progress_payload(user: dict) -> dict:
+    entries = user.get("progress_entries") or []
+    entries = sorted(entries, key=lambda item: item.get("date", ""), reverse=True)
+    latest = entries[0] if entries else None
+    previous = entries[1] if len(entries) > 1 else None
+    changes = {}
+    if latest and previous:
+        for key in ("weight", "waist", "chest", "arm", "thigh"):
+            if latest.get(key) is not None and previous.get(key) is not None:
+                changes[key] = round(latest[key] - previous[key], 1)
+    return {"entries": entries[:50], "latest": latest, "changes": changes}
 
 
 @app.post("/auth", response_model=ProfileResponse)
@@ -423,6 +457,36 @@ async def delete_habit(request: HabitDeleteRequest):
     db.collection("users").document(telegram_id).update({"custom_habits": custom_habits})
     user["custom_habits"] = custom_habits
     return {"ok": True, "profile": profile_payload(user)}
+
+
+@app.post("/progress")
+async def get_progress(request: AuthRequest):
+    _, user = current_user_from_init(request.initData)
+    return progress_payload(user)
+
+
+@app.post("/progress/add")
+async def add_progress(request: ProgressAddRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    entry = {
+        "id": f"progress_{int(time.time())}",
+        "date": today_iso(),
+        "weight": clean_measure(request.weight),
+        "waist": clean_measure(request.waist),
+        "chest": clean_measure(request.chest),
+        "arm": clean_measure(request.arm),
+        "thigh": clean_measure(request.thigh),
+        "note": (request.note or "").strip()[:160],
+    }
+    if all(entry[key] is None for key in ("weight", "waist", "chest", "arm", "thigh")) and not entry["note"]:
+        raise HTTPException(status_code=400, detail="Add at least one measurement")
+
+    entries = user.get("progress_entries") or []
+    entries.append(entry)
+    entries = sorted(entries, key=lambda item: item.get("date", ""), reverse=True)[:50]
+    db.collection("users").document(telegram_id).update({"progress_entries": entries})
+    user["progress_entries"] = entries
+    return {"ok": True, **progress_payload(user)}
 
 
 @app.get("/trainings")
