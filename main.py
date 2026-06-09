@@ -753,4 +753,4 @@ async def get_leaderboard():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "auth-recursion-fixed"}
