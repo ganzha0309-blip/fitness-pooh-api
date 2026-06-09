@@ -5,7 +5,7 @@ import os
 import tempfile
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import parse_qs, unquote
 
@@ -160,10 +160,16 @@ def effective_subscription(user: dict) -> str:
     until = user.get("subscription_until")
     if subscription == "free" or not until:
         return subscription
-    try:
-        if datetime.fromisoformat(until).date() < datetime.now(MSK).date():
+    if isinstance(until, datetime):
+        until_date = until.date()
+    elif isinstance(until, date):
+        until_date = until
+    else:
+        try:
+            until_date = datetime.fromisoformat(str(until)).date()
+        except (TypeError, ValueError):
             return "free"
-    except ValueError:
+    if until_date < datetime.now(MSK).date():
         return "free"
     return subscription
 
@@ -271,7 +277,7 @@ def get_habit_items(user: dict) -> list[dict]:
             }
         )
 
-    subscription = normalize_subscription(user.get("subscription"))
+    subscription = effective_subscription(user)
     custom_limit = CUSTOM_HABIT_LIMITS[subscription]
     for habit in (user.get("custom_habits") or [])[:custom_limit]:
         code = habit.get("code")
