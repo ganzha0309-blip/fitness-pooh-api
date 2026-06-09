@@ -155,6 +155,19 @@ def normalize_subscription(subscription: str | None) -> str:
     return value if value in CUSTOM_HABIT_LIMITS else "free"
 
 
+def effective_subscription(user: dict) -> str:
+    subscription = effective_subscription(user)
+    until = user.get("subscription_until")
+    if subscription == "free" or not until:
+        return subscription
+    try:
+        if datetime.fromisoformat(until).date() < datetime.now(MSK).date():
+            return "free"
+    except ValueError:
+        return "free"
+    return subscription
+
+
 def can_access(user_sub: str, required_sub: str) -> bool:
     return SUBSCRIPTION_ORDER.get(normalize_subscription(user_sub), 0) >= SUBSCRIPTION_ORDER.get(
         normalize_subscription(required_sub), 0
@@ -289,7 +302,7 @@ def today_habits(user: dict) -> dict[str, int]:
 
 
 def profile_payload(user: dict) -> ProfileResponse:
-    subscription = normalize_subscription(user.get("subscription"))
+    subscription = effective_subscription(user)
     custom_habits = user.get("custom_habits") or []
     return ProfileResponse(
         name=user["name"],
@@ -340,7 +353,7 @@ def progress_payload(user: dict) -> dict:
 
 
 def challenge_payload(challenge_id: str, challenge: dict, user_id: str, user: dict) -> dict:
-    subscription = normalize_subscription(user.get("subscription"))
+    subscription = effective_subscription(user)
     required_subscription = normalize_subscription(challenge.get("required_subscription"))
     participant_ref = db.collection("challenge_participants").document(
         participant_doc_id(user_id, challenge_id)
@@ -601,7 +614,7 @@ async def join_challenge(request: ChallengeActionRequest):
     challenge = challenge_doc.to_dict() or {}
     if challenge.get("status", "active") != "active":
         raise HTTPException(status_code=400, detail="Challenge is not active")
-    if not can_access(user.get("subscription", "free"), challenge.get("required_subscription", "free")):
+    if not can_access(effective_subscription(user), challenge.get("required_subscription", "free")):
         raise HTTPException(status_code=403, detail="Subscription required")
 
     participant_ref = db.collection("challenge_participants").document(
