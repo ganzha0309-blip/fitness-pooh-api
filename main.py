@@ -44,6 +44,7 @@ DEFAULT_HABITS = [
     {"code": "sleep", "title": "Сон", "icon": "😴", "caption": "7-8 часов", "is_default": True},
 ]
 CUSTOM_HABIT_LIMITS = {"free": 0, "base": 1, "pro": 2, "vip": 3}
+SUBSCRIPTION_ORDER = {"free": 0, "base": 1, "pro": 2, "vip": 3}
 LEVELS = {
     0: "🍯 Новобранец",
     100: "💪 Боец",
@@ -114,6 +115,11 @@ class ProgressDeleteRequest(BaseModel):
     entry_id: str
 
 
+class ChallengeActionRequest(BaseModel):
+    initData: str
+    challenge_id: str
+
+
 class ProfileResponse(BaseModel):
     name: str
     xp: int
@@ -147,6 +153,16 @@ def compute_level(xp: int) -> str:
 def normalize_subscription(subscription: str | None) -> str:
     value = (subscription or "free").lower()
     return value if value in CUSTOM_HABIT_LIMITS else "free"
+
+
+def can_access(user_sub: str, required_sub: str) -> bool:
+    return SUBSCRIPTION_ORDER.get(normalize_subscription(user_sub), 0) >= SUBSCRIPTION_ORDER.get(
+        normalize_subscription(required_sub), 0
+    )
+
+
+def participant_doc_id(user_id: str, challenge_id: str) -> str:
+    return f"{user_id}_{challenge_id}"
 
 
 def normalize_icon(icon: str | None, fallback: str = "✅") -> str:
@@ -321,6 +337,52 @@ def progress_payload(user: dict) -> dict:
             if latest.get(key) is not None and previous.get(key) is not None:
                 changes[key] = round(latest[key] - previous[key], 1)
     return {"entries": entries[:50], "latest": latest, "changes": changes}
+
+
+def challenge_payload(challenge_id: str, challenge: dict, user_id: str, user: dict) -> dict:
+    subscription = normalize_subscription(user.get("subscription"))
+    required_subscription = normalize_subscription(challenge.get("required_subscription"))
+    participant_ref = db.collection("challenge_participants").document(
+        participant_doc_id(user_id, challenge_id)
+    )
+    participant_doc = participant_ref.get()
+    participant = participant_doc.to_dict() if participant_doc.exists else None
+    completed_dates = participant.get("completed_dates", []) if participant else []
+    duration_days = int(challenge.get("duration_days") or 7)
+    return {
+        "id": challenge_id,
+        "title": challenge.get("title", "Challenge"),
+        "description": challenge.get("description", ""),
+        "duration_days": duration_days,
+        "reward_xp": int(challenge.get("reward_xp") or 0),
+        "required_subscription": required_subscription,
+        "status": challenge.get("status", "active"),
+        "participants_count": int(challenge.get("participants_count") or 0),
+        "available": can_access(subscription, required_subscription),
+        "joined": participant is not None,
+        "participant_status": participant.get("status", "none") if participant else "none",
+        "progress_days": len(completed_dates),
+        "completed_dates": completed_dates,
+        "done_today": today_iso() in completed_dates,
+    }
+
+
+def challenges_payload(user_id: str, user: dict) -> dict:
+    challenges = []
+    for doc in db.collection("challenges").stream():
+        challenge = doc.to_dict() or {}
+        if challenge.get("status", "active") == "hidden":
+            continue
+        challenges.append(challenge_payload(doc.id, challenge, user_id, user))
+    challenges.sort(
+        key=lambda item: (
+            0 if item["available"] else 1,
+            0 if item["participant_status"] == "active" else 1,
+            item["required_subscription"],
+            item["title"],
+        )
+    )
+    return {"challenges": challenges}
 
 
 @app.post("/auth", response_model=ProfileResponse)
@@ -520,6 +582,88 @@ async def delete_progress(request: ProgressDeleteRequest):
     db.collection("users").document(telegram_id).update({"progress_entries": filtered_entries})
     user["progress_entries"] = filtered_entries
     return {"ok": True, **progress_payload(user)}
+
+
+@app.post("/challenges")
+async def get_challenges(request: AuthRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    return challenges_payload(telegram_id, user)
+
+
+@app.post("/challenge/join")
+async def join_challenge(request: ChallengeActionRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    challenge_ref = db.collection("challenges").document(request.challenge_id)
+    challenge_doc = challenge_ref.get()
+    if not challenge_doc.exists:
+        raise HTTPException(status_code=404, detail="Challenge not found")
+
+    challenge = challenge_doc.to_dict() or {}
+    if challenge.get("status", "active") != "active":
+        raise HTTPException(status_code=400, detail="Challenge is not active")
+    if not can_access(user.get("subscription", "free"), challenge.get("required_subscription", "free")):
+        raise HTTPException(status_code=403, detail="Subscription required")
+
+    participant_ref = db.collection("challenge_participants").document(
+        participant_doc_id(telegram_id, request.challenge_id)
+    )
+    if not participant_ref.get().exists:
+        participant_ref.set(
+            {
+                "challenge_id": request.challenge_id,
+                "user_id": telegram_id,
+                "joined_at": now_iso(),
+                "completed_dates": [],
+                "status": "active",
+                "reward_claimed": False,
+            }
+        )
+        challenge_ref.update({"participants_count": firestore.Increment(1)})
+
+    user = db.collection("users").document(telegram_id).get().to_dict() or user
+    return {"ok": True, **challenges_payload(telegram_id, user)}
+
+
+@app.post("/challenge/check")
+async def check_challenge(request: ChallengeActionRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    challenge_ref = db.collection("challenges").document(request.challenge_id)
+    challenge_doc = challenge_ref.get()
+    if not challenge_doc.exists:
+        raise HTTPException(status_code=404, detail="Challenge not found")
+
+    challenge = challenge_doc.to_dict() or {}
+    participant_ref = db.collection("challenge_participants").document(
+        participant_doc_id(telegram_id, request.challenge_id)
+    )
+    participant_doc = participant_ref.get()
+    if not participant_doc.exists:
+        raise HTTPException(status_code=400, detail="Join challenge first")
+
+    participant = participant_doc.to_dict() or {}
+    if participant.get("status") == "completed":
+        return {"ok": True, "message": "Challenge already completed", **challenges_payload(telegram_id, user)}
+
+    today = today_iso()
+    completed_dates = participant.get("completed_dates") or []
+    if today in completed_dates:
+        raise HTTPException(status_code=400, detail="Already checked today")
+
+    completed_dates.append(today)
+    duration_days = int(challenge.get("duration_days") or 7)
+    update_data = {"completed_dates": completed_dates, "last_check_date": today}
+    completed_now = len(completed_dates) >= duration_days
+    if completed_now:
+        update_data["status"] = "completed"
+        update_data["completed_at"] = now_iso()
+        if not participant.get("reward_claimed"):
+            reward_xp = int(challenge.get("reward_xp") or 0)
+            update_data["reward_claimed"] = True
+            db.collection("users").document(telegram_id).update({"xp": firestore.Increment(reward_xp)})
+
+    participant_ref.update(update_data)
+    user = db.collection("users").document(telegram_id).get().to_dict() or user
+    return {"ok": True, **challenges_payload(telegram_id, user)}
 
 
 @app.get("/trainings")
