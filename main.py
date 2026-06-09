@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import parse_qs, unquote
@@ -130,6 +131,10 @@ class ProfileResponse(BaseModel):
 
 def today_iso() -> str:
     return datetime.now(MSK).date().isoformat()
+
+
+def now_iso() -> str:
+    return datetime.now(MSK).isoformat(timespec="milliseconds")
 
 
 def compute_level(xp: int) -> str:
@@ -303,7 +308,11 @@ def clean_measure(value: Optional[float]) -> Optional[float]:
 
 def progress_payload(user: dict) -> dict:
     entries = user.get("progress_entries") or []
-    entries = sorted(entries, key=lambda item: item.get("date", ""), reverse=True)
+    entries = sorted(
+        entries,
+        key=lambda item: item.get("created_at") or item.get("date", "") or "",
+        reverse=True,
+    )
     latest = entries[0] if entries else None
     previous = entries[1] if len(entries) > 1 else None
     changes = {}
@@ -473,9 +482,11 @@ async def get_progress(request: AuthRequest):
 @app.post("/progress/add")
 async def add_progress(request: ProgressAddRequest):
     telegram_id, user = current_user_from_init(request.initData)
+    created_at = now_iso()
     entry = {
-        "id": f"progress_{int(time.time())}",
+        "id": f"progress_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
         "date": today_iso(),
+        "created_at": created_at,
         "weight": clean_measure(request.weight),
         "waist": clean_measure(request.waist),
         "chest": clean_measure(request.chest),
@@ -488,7 +499,11 @@ async def add_progress(request: ProgressAddRequest):
 
     entries = user.get("progress_entries") or []
     entries.append(entry)
-    entries = sorted(entries, key=lambda item: item.get("date", ""), reverse=True)[:50]
+    entries = sorted(
+        entries,
+        key=lambda item: item.get("created_at") or item.get("date", "") or "",
+        reverse=True,
+    )[:50]
     db.collection("users").document(telegram_id).update({"progress_entries": entries})
     user["progress_entries"] = entries
     return {"ok": True, **progress_payload(user)}
