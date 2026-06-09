@@ -58,14 +58,8 @@ app = FastAPI(title="Fitness Pooh API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://ganzha0309-blip.github.io",
-        "https://ganzha0309-blip.github.io/fitness-pooh-app",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://fitness-pooh-app.netlify.app",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
