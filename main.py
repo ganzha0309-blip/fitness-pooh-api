@@ -108,6 +108,11 @@ class ProgressAddRequest(BaseModel):
     note: Optional[str] = None
 
 
+class ProgressDeleteRequest(BaseModel):
+    initData: str
+    entry_id: str
+
+
 class ProfileResponse(BaseModel):
     name: str
     xp: int
@@ -486,6 +491,19 @@ async def add_progress(request: ProgressAddRequest):
     entries = sorted(entries, key=lambda item: item.get("date", ""), reverse=True)[:50]
     db.collection("users").document(telegram_id).update({"progress_entries": entries})
     user["progress_entries"] = entries
+    return {"ok": True, **progress_payload(user)}
+
+
+@app.post("/progress/delete")
+async def delete_progress(request: ProgressDeleteRequest):
+    telegram_id, user = current_user_from_init(request.initData)
+    entries = user.get("progress_entries") or []
+    filtered_entries = [entry for entry in entries if entry.get("id") != request.entry_id]
+    if len(filtered_entries) == len(entries):
+        raise HTTPException(status_code=404, detail="Progress entry not found")
+
+    db.collection("users").document(telegram_id).update({"progress_entries": filtered_entries})
+    user["progress_entries"] = filtered_entries
     return {"ok": True, **progress_payload(user)}
 
 
