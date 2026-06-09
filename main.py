@@ -156,7 +156,7 @@ def normalize_subscription(subscription: str | None) -> str:
 
 
 def effective_subscription(user: dict) -> str:
-    subscription = effective_subscription(user)
+    subscription = normalize_subscription(user.get("subscription"))
     until = user.get("subscription_until")
     if subscription == "free" or not until:
         return subscription
